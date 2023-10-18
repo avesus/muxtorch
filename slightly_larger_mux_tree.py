@@ -69,6 +69,14 @@ print(Mux(1, -1, 1))
 print(Mux(1, 1, 1))
 '''
 
+torch_w0_grad = 0.0
+
+def on_w0_grad (grad) :
+  #global torch_w0_grad
+  print('w0.grad', grad.item())
+
+  #torch_w0_grad += grad.item()
+  return grad
 
 class one_layer_net (torch.nn.Module):    
 
@@ -120,6 +128,9 @@ class one_layer_net (torch.nn.Module):
         '''
         print(self.l1.state_dict())
 
+        # self.l1.weight[0][0].retain_grad()
+        self.l1.weight.retain_grad()
+
     def forward (self, x) :
 
       # Noise bases if weights are too far from abs(1)
@@ -133,22 +144,30 @@ class one_layer_net (torch.nn.Module):
         if pp.requires_grad :
           if len(pp) > 1 :
             for p in pp :
-              noise[j] = torch.square(1.0 - torch.abs(p))
+              #noise[j] = torch.square(1.0 - torch.abs(p))
+              # Much much closer to 1
+              noise[j] = abs(1.0 - abs(p))
               j = j + 1
           else :
             p = pp
-            noise[j] = torch.square(1.0 - torch.abs(p))
+            #noise[j] = torch.square(1.0 - torch.abs(p))
+            noise[j] = abs(1.0 - abs(p))
             j = j + 1
 
-      w0 = self.l1.weight[0][0] + noise[0] * np.random.normal() * 0.125
-      w1 = self.l1.weight[1][0] + noise[1] * np.random.normal() * 0.125
-      w2 = self.l1.weight[2][0] + noise[2] * np.random.normal() * 0.125
-      w3 = self.l1.weight[3][0] + noise[3] * np.random.normal() * 0.125
-      w4 = self.l1.weight[4][0] + noise[4] * np.random.normal() * 0.125
-      w5 = self.l1.weight[5][0] + noise[5] * np.random.normal() * 0.125
-      w6 = self.l1.weight[6][0] + noise[6] * np.random.normal() * 0.125
-      w7 = self.l1.weight[7][0] + noise[7] * np.random.normal() * 0.125
-      w8 = self.l1.weight[8][0] + noise[8] * np.random.normal() * 0.125
+      noise_scaler = 2.0
+
+      w0 = self.l1.weight[0][0] + noise[0] * np.random.normal() * 0.125 * noise_scaler
+      # w0.register_hook(on_w0_grad)
+      w1 = self.l1.weight[1][0] + noise[1] * np.random.normal() * 0.125 * noise_scaler
+      w2 = self.l1.weight[2][0] + noise[2] * np.random.normal() * 0.125 * noise_scaler
+      w3 = self.l1.weight[3][0] + noise[3] * np.random.normal() * 0.125 * noise_scaler
+      w4 = self.l1.weight[4][0] + noise[4] * np.random.normal() * 0.125 * noise_scaler
+      w5 = self.l1.weight[5][0] + noise[5] * np.random.normal() * 0.125 * noise_scaler
+      w6 = self.l1.weight[6][0] + noise[6] * np.random.normal() * 0.125 * noise_scaler
+      w7 = self.l1.weight[7][0] + noise[7] * np.random.normal() * 0.125 * noise_scaler
+      w8 = self.l1.weight[8][0] + noise[8] * np.random.normal() * 0.125 * noise_scaler
+
+      # self.w0 = w0
 
       a = x[0]
       b = x[1]
@@ -156,11 +175,15 @@ class one_layer_net (torch.nn.Module):
       inv_b = Mux(b, 1, -1)
 
       # Routable MUX:
-      selC = Mux(w0,
-        Mux(w1,
+      w0_mux_a = Mux(w1,
           Mux(w2, a, inv_a),
-          Mux(w2, b, inv_b)),
-        Mux(w1, 1.0, -1.0))
+          Mux(w2, b, inv_b))
+
+      w0_mux_b = Mux(w1, 1.0, -1.0) 
+
+      selC = Mux(w0,
+        w0_mux_a,
+        w0_mux_b)
 
       selA = Mux(w3,
         Mux(w4,
@@ -174,7 +197,11 @@ class one_layer_net (torch.nn.Module):
           Mux(w8, b, inv_b)),
         Mux(w7, 1.0, -1.0))
 
+      # Gradient to w0:
+      self.w0_grad = 0.5 * (w0_mux_b.item() - w0_mux_a.item()) * (0.5 * (selB.item() - selA.item()))
+
       return Mux(selC, selA, selB)
+      #return torch.tensor(Mux(selC, selA, selB), requires_grad=True)
       
       # LUT2:
       return Mux(x[1],
@@ -220,10 +247,23 @@ if sgd :
 
 epochs *= 3
 
+w0_momentum = 0.0
+b = 0.0
+
+next_w = model.l1.weight[0][0].item()
+obj_w = model.l1.weight[0][0].item()
+
 for epoch in range(epochs):
     epoch = epoch + 1
 
     network = 0.0
+
+    # yhat_00 = None
+    yhat_00_grad = 0.0
+    w0_grad = 0.0
+    w00_grad = 0.0
+
+    torch_w0_grad = 0.0
 
     if sgd :
         i = random.randrange(len(X))
@@ -244,16 +284,66 @@ for epoch in range(epochs):
 
           yhat = model(x)
 
+          #if i == 0 and j == 0 :
+          # Manual gradient:
+
+          yhat_00_grad = 2.0 * (yhat.item() - y.item()) 
+          w00_grad += model.w0_grad * yhat_00_grad
+
+          # yhat_00 = yhat.grad
+
+          # Least squares loss
           network = network + torch.square(torch.sub(y, yhat))
+          # Squared hinge loss
+          # network = network + torch.square(torch.max(torch.tensor(0.0), 1.0 - 0.125 * y * yhat))
 
     network.backward()
+    print('Total gradient of w0', model.l1.weight.grad[0][0].item() - w00_grad) # , torch_w0_grad)
+
+    # w00_grad = model.l1.weight.grad[0][0].item()
+
+    b =       0.9 * b                    + w00_grad + 0.01 * obj_w
+    next_w = obj_w - 0.004 * b
+
+    #b =       0.9 * b           +  0.004 * w00_grad + 0.00004 * obj_w
+    #next_w = 0.99 * obj_w - b
+
+    #b =       0.9 * b                    + w00_grad + 0.01 * model.l1.weight[0][0].item()
+    #next_w = model.l1.weight[0][0].item() - 0.004 * b
+
+    #next_w = 0.99 * model.l1.weight[0][0].item() - b
+    #b =       0.9 * b           +  0.004 * w00_grad + 0.00004 * model.l1.weight[0][0].item()
+
+    #next_m = 0.9 * w0_momentum + 0.004 * (w0_grad + 0.01 * model.l1.weight[0][0])
+    #next_w = model.l1.weight[0][0] * 0.99 - w0_momentum
+
+    #w0_momentum = next_m
+
+    #print(model.l1.weight[0][0] - next_w, 'Prev', 
+    #  model.l1.weight[0][0], 'next', next_w)
+
+    #print('Grad:', w0_grad, 'Momentum:', w0_momentum, 'Prev w0:',
+    #  model.l1.weight[0][0],
+    #  'Next w0:',
+    #  next_w)
+
+        # model.l1.weight.grad) # .grad[0][0])
+
 
     lr1 = optimizer.param_groups[0]["lr"]
     print('Epoch:', epoch, 'Loss:', network.item(), 'Learning Rate:', lr1)
 
     optimizer.step()
     #scheduler.step()
+
+    print('DIFF:', model.l1.weight[0][0].item() - next_w)
+    obj_w = next_w
+
+    # print('grad', model.l1.weight.grad[0][0], w0_grad)
+    # print('Gradient of yhat_0 at noise 0:', yhat_00, yhat_00_grad, w0_grad, model.l1.weight.grad[0][0])
     optimizer.zero_grad()
+
+    # model.l1.weight.data[0][0] = obj_w
 
     cost.append(network.item())
 
