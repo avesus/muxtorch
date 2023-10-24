@@ -129,7 +129,7 @@ class one_layer_net (torch.nn.Module):
         print(self.l1.state_dict())
 
         # self.l1.weight[0][0].retain_grad()
-        self.l1.weight.retain_grad()
+        #self.l1.weight.retain_grad()
 
     def forward (self, x) :
 
@@ -156,7 +156,9 @@ class one_layer_net (torch.nn.Module):
 
       noise_scaler = 2.0
 
-      w0 = self.l1.weight[0][0] + noise[0] * np.random.normal() * 0.125 * noise_scaler
+      random_term = np.random.normal() * 0.125 * noise_scaler
+
+      w0 = self.l1.weight[0][0] + noise[0] * random_term # np.random.normal() * 0.125 * noise_scaler
       # w0.register_hook(on_w0_grad)
       w1 = self.l1.weight[1][0] + noise[1] * np.random.normal() * 0.125 * noise_scaler
       w2 = self.l1.weight[2][0] + noise[2] * np.random.normal() * 0.125 * noise_scaler
@@ -199,6 +201,8 @@ class one_layer_net (torch.nn.Module):
 
       # Gradient to w0:
       self.w0_grad = 0.5 * (w0_mux_b.item() - w0_mux_a.item()) * (0.5 * (selB.item() - selA.item()))
+      subterm = abs(1.0 - abs(self.l1.weight[0][0].item()))
+      self.w0_grad += -np.sign(self.l1.weight[0][0].item()) * np.sign(subterm) * random_term * self.w0_grad
 
       return Mux(selC, selA, selB)
       #return torch.tensor(Mux(selC, selA, selB), requires_grad=True)
@@ -238,14 +242,15 @@ optimizer = torch.optim.SGD(model.parameters(), lr=0.004, weight_decay=0.01, mom
 # Define the training loop
 # Converges on AdamW 0.1
 
-epochs = 170
+#epochs = 170
+epochs = 200
 cost = []
 
 sgd = False
 if sgd :
   epochs *= 100
 
-epochs *= 3
+# epochs *= 3
 
 w0_momentum = 0.0
 b = 0.0
@@ -343,7 +348,7 @@ for epoch in range(epochs):
     # print('Gradient of yhat_0 at noise 0:', yhat_00, yhat_00_grad, w0_grad, model.l1.weight.grad[0][0])
     optimizer.zero_grad()
 
-    # model.l1.weight.data[0][0] = obj_w
+    model.l1.weight.data[0][0] = obj_w
 
     cost.append(network.item())
 
